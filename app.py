@@ -12,18 +12,32 @@ st.set_page_config(page_title="Login + Chat", page_icon="🔐", layout="centered
 DB_PATH = Path("users.db")
 
 # ------------------------ CHAVE GEMINI --------------------------
-API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+# Lê a chave dos Secrets (Cloud) ou variável de ambiente (local)
+API_KEY = (st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+
 if not API_KEY:
-    st.info(
-        "Adicione sua GEMINI_API_KEY em **Settings → Secrets** (no Streamlit Cloud) "
-        "ou em `.streamlit/secrets.toml` (local)."
+    st.error(
+        "GEMINI_API_KEY ausente. Defina em **Manage app → Settings → Secrets** (Cloud) "
+        'como:  GEMINI_API_KEY = "AIza...sua_chave..."'
     )
-    st.stop()  # não segue sem chave
+    st.stop()
 
-genai.configure(api_key=API_KEY)
-st.caption("🔑 Gemini key carregada: ✅")
+if not API_KEY.startswith("AIza"):
+    st.error(
+        "A chave informada **não parece válida** (não começa com `AIza`). "
+        "Abra o **Google AI Studio → API keys**, gere uma nova e copie a chave **completa**."
+    )
+    st.stop()
 
-# Descobrir modelos disponíveis que suportam generateContent
+# Configura a SDK
+try:
+    genai.configure(api_key=API_KEY)
+    st.caption("🔑 Gemini key carregada: ✅")
+except Exception as e:
+    st.error(f"Falha ao configurar Gemini: {e}")
+    st.stop()
+
+# Descobre modelos disponíveis que suportam generateContent
 AVAILABLE = []
 try:
     AVAILABLE = [
@@ -36,7 +50,7 @@ except Exception:
 def pick_model(candidates, available):
     for pref in candidates:
         for name in available:
-            # aceita "gemini-1.5-flash-latest" e também "models/gemini-1.5-flash-latest"
+            # aceita "gemini-1.5-flash-latest" e "models/gemini-1.5-flash-latest"
             if name.endswith(pref) or pref in name:
                 return name
     return None
@@ -51,6 +65,7 @@ MODEL_ID = pick_model(
     ],
     AVAILABLE,
 ) or "gemini-pro"
+
 st.session_state.setdefault("_gemini_model_id", MODEL_ID)
 # ===============================================================
 
@@ -157,7 +172,6 @@ if st.session_state.logged_in:
     st.success(f"✅ Logado como **{st.session_state.username}**.")
     st.header("🤖 Chatbot (Gemini)")
 
-    # (Opcional) ver o modelo escolhido e a lista obtida
     with st.expander("Modelos disponíveis (debug)"):
         st.write(AVAILABLE or "—")
         st.write("Usando:", st.session_state.get("_gemini_model_id"))
@@ -168,13 +182,13 @@ if st.session_state.logged_in:
     if "gemini_chat" not in st.session_state:
         st.session_state["gemini_chat"] = model.start_chat(history=[])
 
-    # renderiza histórico
+    # histórico
     for turn in st.session_state["gemini_chat"].history:
         role = "user" if turn.role == "user" else "assistant"
         with st.chat_message(role):
             st.markdown("".join(getattr(p, "text", "") for p in turn.parts))
 
-    # entrada do usuário
+    # entrada
     prompt = st.chat_input("Pergunte algo…")
     if prompt:
         with st.chat_message("user"):
@@ -185,7 +199,7 @@ if st.session_state.logged_in:
             acc = ""
             try:
                 for chunk in st.session_state["gemini_chat"].send_message(prompt, stream=True):
-                    acc += chunk.text or ""
+                    acc += (chunk.text or "")
                     ph.markdown(acc)
             except Exception as e:
                 st.error(f"Erro no Gemini: {e}")
