@@ -7,38 +7,25 @@ from datetime import datetime
 import streamlit as st
 import google.generativeai as genai
 
-# ======================== CONFIG INICIAL ========================
+# ======================== CONFIG GERAL ========================
 st.set_page_config(page_title="Login + Chat", page_icon="🔐", layout="centered")
 DB_PATH = Path("users.db")
 
-# ------------------------ CHAVE GEMINI --------------------------
-# Lê a chave dos Secrets (Cloud) ou variável de ambiente (local)
+# ------------------------ GEMINI (AI) ------------------------
 API_KEY = (st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+AVAILABLE: list[str] = []
+MODEL_ID: str | None = None
 
 if not API_KEY:
-    st.error(
-        "GEMINI_API_KEY ausente. Defina em **Manage app → Settings → Secrets** (Cloud) "
-        'como:  GEMINI_API_KEY = "AIza...sua_chave..."'
-    )
+    st.error("Defina GEMINI_API_KEY em Settings → Secrets (Cloud) ou .streamlit/secrets.toml (local).")
     st.stop()
-
 if not API_KEY.startswith("AIza"):
-    st.error(
-        "A chave informada **não parece válida** (não começa com `AIza`). "
-        "Abra o **Google AI Studio → API keys**, gere uma nova e copie a chave **completa**."
-    )
+    st.error("Sua chave não parece válida (deveria começar com 'AIza'). Gere/copie a chave completa no Google AI Studio.")
     st.stop()
 
-# Configura a SDK
-try:
-    genai.configure(api_key=API_KEY)
-    st.caption("🔑 Gemini key carregada: ✅")
-except Exception as e:
-    st.error(f"Falha ao configurar Gemini: {e}")
-    st.stop()
+genai.configure(api_key=API_KEY)
 
-# Descobre modelos disponíveis que suportam generateContent
-AVAILABLE = []
+# Tenta listar modelos e escolher um compatível com generateContent
 try:
     AVAILABLE = [
         m.name for m in genai.list_models()
@@ -47,10 +34,9 @@ try:
 except Exception:
     AVAILABLE = []
 
-def pick_model(candidates, available):
+def pick_model(candidates: list[str], available: list[str]) -> str | None:
     for pref in candidates:
         for name in available:
-            # aceita "gemini-1.5-flash-latest" e "models/gemini-1.5-flash-latest"
             if name.endswith(pref) or pref in name:
                 return name
     return None
@@ -67,10 +53,8 @@ MODEL_ID = pick_model(
 ) or "gemini-pro"
 
 st.session_state.setdefault("_gemini_model_id", MODEL_ID)
-# ===============================================================
 
-
-# ============================= DB ==============================
+# =========================== DB ==============================
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
@@ -114,10 +98,8 @@ def check_credentials(username: str, password: str) -> bool:
         cur = con.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
         return bool(row and row[0] == hash_password(password))
-# ===============================================================
 
-
-# ============================== UI =============================
+# ============================ UI =============================
 init_db()
 
 if "logged_in" not in st.session_state:
@@ -167,43 +149,79 @@ with tab_register:
 
 st.divider()
 
-# ------------------------- ÁREA LOGADA -------------------------
+# ---------------------- ÁREA LOGADA -------------------------
 if st.session_state.logged_in:
     st.success(f"✅ Logado como **{st.session_state.username}**.")
     st.header("🤖 Chatbot (Gemini)")
 
+    # Debug opcional de modelos
     with st.expander("Modelos disponíveis (debug)"):
         st.write(AVAILABLE or "—")
         st.write("Usando:", st.session_state.get("_gemini_model_id"))
 
-    # cria o modelo e mantém um chat com histórico na sessão
-    model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
+    # === Base de conhecimento (.txt) ===
+    # 1) TXT fixo no repositório (opcional)
+    contexto_fixo = ""
+    try:
+        contexto_fixo = Path("data/brand_manual.txt").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
 
+    # 2) Upload de TXT na hora (opcional)
+    uploaded = st.file_uploader("Envie um .txt (opcional) para o chat usar como base", type=["txt"])
+    contexto_upload = ""
+    if uploaded is not None:
+        contexto_upload = uploaded.read().decode("utf-8", errors="ignore")
+        st.success(f"Arquivo carregado ({len(contexto_upload)} caracteres).")
+
+    contexto = "\n\n".join(s for s in [contexto_fixo, contexto_upload] if s)
+
+    # Cria o modelo com ou sem system_instruction
+    if contexto:
+        instrucoes = (
+            "Você é um assistente. Use o texto abaixo como base quando for relevante. "
+            "Se a pergunta não estiver respondida pelo material, diga que não encontrou.\n\n"
+            f"{contexto}"
+        )
+        model = genai.GenerativeModel(
+            st.session_state["_gemini_model_id"],
+            system_instruction=instrucoes,
+        )
+    else:
+        model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
+
+    # Aplicar base e reiniciar chat (para garantir que a instrução entra)
+    if contexto and st.button("Aplicar base e reiniciar chat"):
+        st.session_state.pop("gemini_chat", None)
+        st.rerun()
+
+    # Chat com histórico
     if "gemini_chat" not in st.session_state:
         st.session_state["gemini_chat"] = model.start_chat(history=[])
 
-    # histórico
+    # Histórico
     for turn in st.session_state["gemini_chat"].history:
         role = "user" if turn.role == "user" else "assistant"
         with st.chat_message(role):
             st.markdown("".join(getattr(p, "text", "") for p in turn.parts))
 
-    # entrada
+    # Entrada
     prompt = st.chat_input("Pergunte algo…")
     if prompt:
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            ph = st.empty()
+            placeholder = st.empty()
             acc = ""
             try:
                 for chunk in st.session_state["gemini_chat"].send_message(prompt, stream=True):
-                    acc += (chunk.text or "")
-                    ph.markdown(acc)
+                    acc += chunk.text or ""
+                    placeholder.markdown(acc)
             except Exception as e:
                 st.error(f"Erro no Gemini: {e}")
 
+    # Ações auxiliares
     c1, c2 = st.columns(2)
     if c1.button("🧹 Limpar chat"):
         st.session_state["gemini_chat"] = model.start_chat(history=[])
@@ -214,4 +232,4 @@ if st.session_state.logged_in:
         st.info("Sessão encerrada.")
 else:
     st.info("Faça login para acessar o conteúdo.")
-# ===============================================================
+# =============================================================

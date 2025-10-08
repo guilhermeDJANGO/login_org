@@ -1,0 +1,84 @@
+INSTRUÇÕES AO ASSISTENTE
+- Siga este manual. Se a pergunta não estiver aqui, diga: "Não encontrei essa informação no manual de marca."
+- Não invente códigos de cor nem slogans. Não forneça arquivos de logo.
+
+SOBRE A MARCA
+- Nome: NIKE (exemplo ilustrativo)
+- Essência: Capacitar todo atleta a ir além.
+- Missão: Inspirar e inovar para cada atleta* no mundo.
+- Visão: Ser referência global em performance esportiva e cultura do movimento.
+- Pilares: Performance, Inovação, Inclusão, Sustentabilidade, Cultura.
+- Público: Jovens e adultos ativos, fãs de esporte e lifestyle.
+
+TOM DE VOZ
+- Características: enérgico, conciso, motivador, confiante, humano.
+- Preferir: “Vai.” “Agora.” “Faça.” “Movimente-se.” “Superação.”
+- Evitar: jargão técnico sem contexto, tom arrogante, promessas irreais.
+- Exemplos:
+  1) “Vai além do que você acha possível.”
+  2) “Faça do treino seu momento.”
+  3) “Seu próximo passo começa agora.”
+
+IDENTIDADE VISUAL — LOGO
+- Versões: principal (swoosh + wordmark), só swoosh, mono P&B, negativo.
+- Respiro: mínimo de 1× a altura do swoosh em todas as direções.
+- Tamanho mínimo: impressão 12 mm; digital 48 px de altura (exemplo).
+- Fundos: sólidos de alto contraste; evitar fundos poluídos.
+- Proibições: distorcer, inclinar, aplicar contornos/sombras, gradientes não aprovados, alterar proporções.
+
+CORES (HEX/RGB)  — *valores ilustrativos*
+- Preto Potência: #000000 / 0,0,0
+- Branco Total: #FFFFFF / 255,255,255
+- Laranja Energia: #FF5A00 / 255,90,0
+- Cinza Base: #F2F2F2 / 242,242,242
+- Uso: fundos (preto/branco), CTA (laranja), textos (preto), superfícies (cinza).
+
+TIPOGRAFIA  — *famílias ilustrativas*
+- Títulos: “Anton” (Google Fonts) / Bold / 48–72 / Alternativa: “Oswald”
+- Texto: “Inter” / Regular–Medium / 14–18 / Alternativa: “Roboto”
+- Hierarquia: H1 forte, H2 enxuto, H3 utilitário; interlinha 1.2–1.4.
+
+IMAGENS E FOTOGRAFIA
+- Estilo: atletas em movimento, quadros dinâmicos, suor e textura real.
+- Priorizar: momentos de ação, treino, foco; backgrounds simples.
+- Evitar: composições genéricas, excesso de filtros, imagens posadas demais.
+
+ICONOGRAFIA
+- Estilo: traço sólido, cantos levemente arredondados, alto contraste.
+- Tamanho: 24/32 px; espessura consistente.
+- Don’ts: contornos múltiplos, ângulos inconsistentes, sombras longas.
+
+LAYOUT E GRID
+- Grid: 12 col / margens 24 px / gutter 24 px.
+- Safe area: 32 px; bordas 12–16 px; cards com raio 12 px.
+- Exemplo: hero com chamada curta, CTA destacado, imagem de movimento.
+
+NOME DE PRODUTO E MARCAÇÕES
+- Capitalização: nomes próprios e linhas com Maiúsculas Iniciais.
+- Prefixos: Air / Zoom / React (exemplo); evitar sufixos confusos.
+- Citar linhas: “Nike Air Zoom Pegasus 40” (exemplo).
+
+CO-BRANDING
+- Hierarquia: marca principal à esquerda; parceira à direita; respiro 1×.
+- Paleta: use neutros quando houver conflito de cores.
+
+SOCIAL MEDIA
+- Formatos: 1080×1080, 1080×1350, 1920×1080.
+- CTA: curto e acionável; 1 por peça.
+- Hashtags (exemplo): #Treine #Corra #Supere
+- Comentários: motivar, reconhecer esforço, evitar discussões.
+
+LEGAIS
+- ®/™ conforme registro local. Não use marcas de terceiros sem autorização.
+- Direitos de imagem: garantir consentimento para atletas/participantes.
+- Aprovação final pelo time de branding.
+
+FAQ DO MANUAL
+- Posso mudar a cor do swoosh? → Não. Nunca altere cor/formato/proporção.
+- O que usar quando a foto tem fundo complexo? → Versão mono com respiro maior.
+- Posso criar slogans novos? → Não. Utilize mensagens curtas aprovadas.
+
+METADADOS
+- Versão: 1.0 (ilustrativo)
+- Atualização: 2025-10-08
+- Responsáveis: Time de Branding (exemplo)
