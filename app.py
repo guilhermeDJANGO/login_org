@@ -6,6 +6,7 @@ from datetime import datetime
 
 import streamlit as st
 import google.generativeai as genai
+from pypdf import PdfReader  # <-- NOVO
 
 # ======================== CONFIG GERAL ========================
 st.set_page_config(page_title="Login + Chat", page_icon="🔐", layout="centered")
@@ -152,84 +153,112 @@ st.divider()
 # ---------------------- ÁREA LOGADA -------------------------
 if st.session_state.logged_in:
     st.success(f"✅ Logado como **{st.session_state.username}**.")
-    st.header("🤖 Chatbot (Gemini)")
 
-    # Debug opcional de modelos
-    with st.expander("Modelos disponíveis (debug)"):
-        st.write(AVAILABLE or "—")
-        st.write("Usando:", st.session_state.get("_gemini_model_id"))
+    # 🔽 AQUI: duas abas internas — Chat e PDF
+    tab_chat, tab_pdf = st.tabs(["🤖 Chat", "📄 PDF → texto"])
 
-    # === Base de conhecimento (.txt) ===
-    # 1) TXT fixo no repositório (opcional)
-    contexto_fixo = ""
-    try:
-        contexto_fixo = Path("data/brand_manual.txt").read_text(encoding="utf-8")
-    except FileNotFoundError:
-        pass
+    # ============ ABA 1: CHAT (Gemini) ============
+    with tab_chat:
+        st.header("🤖 Chatbot (Gemini)")
 
-    # 2) Upload de TXT na hora (opcional)
-    uploaded = st.file_uploader("Envie um .txt (opcional) para o chat usar como base", type=["txt"])
-    contexto_upload = ""
-    if uploaded is not None:
-        contexto_upload = uploaded.read().decode("utf-8", errors="ignore")
-        st.success(f"Arquivo carregado ({len(contexto_upload)} caracteres).")
+        with st.expander("Modelos disponíveis (debug)"):
+            st.write(AVAILABLE or "—")
+            st.write("Usando:", st.session_state.get("_gemini_model_id"))
 
-    contexto = "\n\n".join(s for s in [contexto_fixo, contexto_upload] if s)
+        # (Opcional) Base de conhecimento por TXT
+        contexto_fixo = ""
+        try:
+            contexto_fixo = Path("data/brand_manual.txt").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
 
-    # Cria o modelo com ou sem system_instruction
-    if contexto:
-        instrucoes = (
-            "Você é um assistente. Use o texto abaixo como base quando for relevante. "
-            "Se a pergunta não estiver respondida pelo material, diga que não encontrou.\n\n"
-            f"{contexto}"
-        )
-        model = genai.GenerativeModel(
-            st.session_state["_gemini_model_id"],
-            system_instruction=instrucoes,
-        )
-    else:
-        model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
+        uploaded = st.file_uploader("Envie um .txt (opcional) para o chat usar como base", type=["txt"])
+        contexto_upload = ""
+        if uploaded is not None:
+            contexto_upload = uploaded.read().decode("utf-8", errors="ignore")
+            st.success(f"Arquivo carregado ({len(contexto_upload)} caracteres).")
 
-    # Aplicar base e reiniciar chat (para garantir que a instrução entra)
-    if contexto and st.button("Aplicar base e reiniciar chat"):
-        st.session_state.pop("gemini_chat", None)
-        st.rerun()
+        contexto = "\n\n".join(s for s in [contexto_fixo, contexto_upload] if s)
 
-    # Chat com histórico
-    if "gemini_chat" not in st.session_state:
-        st.session_state["gemini_chat"] = model.start_chat(history=[])
+        if contexto:
+            instrucoes = (
+                "Você é um assistente. Use o texto abaixo como base quando for relevante. "
+                "Se a pergunta não estiver respondida pelo material, diga que não encontrou.\n\n"
+                f"{contexto}"
+            )
+            model = genai.GenerativeModel(
+                st.session_state["_gemini_model_id"],
+                system_instruction=instrucoes,
+            )
+        else:
+            model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
 
-    # Histórico
-    for turn in st.session_state["gemini_chat"].history:
-        role = "user" if turn.role == "user" else "assistant"
-        with st.chat_message(role):
-            st.markdown("".join(getattr(p, "text", "") for p in turn.parts))
+        if contexto and st.button("Aplicar base e reiniciar chat"):
+            st.session_state.pop("gemini_chat", None)
+            st.rerun()
 
-    # Entrada
-    prompt = st.chat_input("Pergunte algo…")
-    if prompt:
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        if "gemini_chat" not in st.session_state:
+            st.session_state["gemini_chat"] = model.start_chat(history=[])
 
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            acc = ""
+        # histórico
+        for turn in st.session_state["gemini_chat"].history:
+            role = "user" if turn.role == "user" else "assistant"
+            with st.chat_message(role):
+                st.markdown("".join(getattr(p, "text", "") for p in turn.parts))
+
+        # entrada
+        prompt = st.chat_input("Pergunte algo…")
+        if prompt:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                acc = ""
+                try:
+                    for chunk in st.session_state["gemini_chat"].send_message(prompt, stream=True):
+                        acc += chunk.text or ""
+                        placeholder.markdown(acc)
+                except Exception as e:
+                    st.error(f"Erro no Gemini: {e}")
+
+        c1, c2 = st.columns(2)
+        if c1.button("🧹 Limpar chat"):
+            st.session_state["gemini_chat"] = model.start_chat(history=[])
+            st.rerun()
+        if c2.button("🚪 Sair"):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.info("Sessão encerrada.")
+
+    # ============ ABA 2: PDF → TEXTO ============
+    with tab_pdf:
+        st.header("📄 Upload de PDF e extração de texto")
+
+        pdf_file = st.file_uploader("Envie um arquivo PDF", type=["pdf"], key="pdf_uploader")
+        if pdf_file is not None:
             try:
-                for chunk in st.session_state["gemini_chat"].send_message(prompt, stream=True):
-                    acc += chunk.text or ""
-                    placeholder.markdown(acc)
-            except Exception as e:
-                st.error(f"Erro no Gemini: {e}")
+                reader = PdfReader(pdf_file)
+                parts = []
+                for i, page in enumerate(reader.pages, start=1):
+                    text = page.extract_text() or ""
+                    parts.append(f"\n\n===== Página {i} =====\n{text}")
 
-    # Ações auxiliares
-    c1, c2 = st.columns(2)
-    if c1.button("🧹 Limpar chat"):
-        st.session_state["gemini_chat"] = model.start_chat(history=[])
-        st.rerun()
-    if c2.button("🚪 Sair"):
-        st.session_state.logged_in = False
-        st.session_state.username = ""
-        st.info("Sessão encerrada.")
+                full_text = "".join(parts).strip()
+
+                if not full_text:
+                    st.warning("Não foi possível extrair texto. Se o PDF for imagem (scaneado), este método não faz OCR.")
+                else:
+                    st.success(f"Extraído com sucesso — {len(full_text)} caracteres.")
+                    st.text_area("Texto extraído", full_text, height=420)
+                    st.download_button(
+                        "Baixar texto (.txt)",
+                        full_text,
+                        file_name=f"pdf_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+                    )
+            except Exception as e:
+                st.error(f"Erro ao ler/extrair o PDF: {e}")
+
 else:
     st.info("Faça login para acessar o conteúdo.")
 # =============================================================
