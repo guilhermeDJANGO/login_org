@@ -1,69 +1,89 @@
 # app.py
-# =============================================================
-# Login + Chat (Gemini) + PDF->Texto + SEO Optimizer
-# =============================================================
-
 import os
 import json
+import time
 import sqlite3
 import hashlib
 from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
-import google.generativeai as genai
-from pypdf import PdfReader
 
-# ----------------------- CONFIG GERAL ------------------------
-st.set_page_config(page_title="Login + Chat + PDF + SEO", page_icon="🔐", layout="centered")
+# Google Gemini
+import google.generativeai as genai
+import google.api_core.exceptions as gexc
+
+# ======================== CONFIG GERAL ========================
+st.set_page_config(page_title="Login + Chat + PDF + SEO + Email", page_icon="🔐", layout="centered")
 DB_PATH = Path("users.db")
 
-# --------------------- GEMINI (API & MODELO) ----------------
+# ====================== OBTÉM API KEY ========================
 API_KEY = (st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
-AVAILABLE: list[str] = []
-MODEL_ID: str | None = None
+if not API_KEY:
+    st.error("Defina GEMINI_API_KEY em Settings → Secrets (Cloud) ou em .streamlit/secrets.toml (local).")
+    st.stop()
+if not API_KEY.startswith("AIza"):
+    st.error("Sua chave não parece válida (deveria começar com 'AIza'). Gere/copie no Google AI Studio.")
+    st.stop()
 
-def _configure_gemini() -> None:
-    global AVAILABLE, MODEL_ID
-    if not API_KEY:
-        st.error("Defina GEMINI_API_KEY em Settings → Secrets (Cloud) ou .streamlit/secrets.toml (local).")
-        st.stop()
-    if not API_KEY.startswith("AIza"):
-        st.error("Sua chave não parece válida (deveria começar com 'AIza'). Gere/copie a chave completa no Google AI Studio.")
-        st.stop()
+genai.configure(api_key=API_KEY)
 
-    genai.configure(api_key=API_KEY)
+# ============== LISTA MODELOS E ESCOLHE UM COMPATÍVEL =========
+def safe_list_models():
     try:
-        AVAILABLE = [
+        return [
             m.name for m in genai.list_models()
             if "generateContent" in getattr(m, "supported_generation_methods", [])
         ]
     except Exception:
-        AVAILABLE = []
+        return []
 
-    def pick_model(candidates: list[str], available: list[str]) -> str | None:
-        for pref in candidates:
-            for name in available:
-                if name.endswith(pref) or pref in name:
-                    return name
-        return None
+AVAILABLE = safe_list_models()
 
-    MODEL_ID = pick_model(
-        [
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro-latest",
-            "gemini-1.5-pro",
-            "gemini-pro",
-        ],
-        AVAILABLE,
-    ) or "gemini-pro"
+def pick_model(candidates, available):
+    for pref in candidates:
+        for name in available:
+            if name.endswith(pref) or pref in name:
+                return name
+    return None
 
-    st.session_state.setdefault("_gemini_model_id", MODEL_ID)
+PREFERRED = [
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro-latest",
+    "gemini-1.5-pro",
+    "gemini-pro",
+]
+MODEL_ID = pick_model(PREFERRED, AVAILABLE) or "gemini-1.5-flash"
+st.session_state.setdefault("_gemini_model_id", MODEL_ID)
 
-_configure_gemini()
+# ===================== RATE-LIMIT / BACKOFF ===================
+MIN_INTERVAL = 30  # segundos entre chamadas por usuário (throttling)
 
-# -------------------------- DB (SQLite) ----------------------
+def send_with_retry(chat, prompt, max_tries=3, initial_wait=2.0):
+    """Envia mensagem com retry/backoff em caso de 429 (quota/limite)."""
+    wait = initial_wait
+    for i in range(max_tries):
+        try:
+            return chat.send_message(prompt, stream=True)
+        except gexc.ResourceExhausted:
+            if i == max_tries - 1:
+                raise
+            time.sleep(wait)
+            wait *= 2
+        except Exception:
+            raise
+
+def ensure_throttle():
+    now = time.time()
+    last = st.session_state.get("_last_call_ts", 0)
+    if now - last < MIN_INTERVAL:
+        falta = int(MIN_INTERVAL - (now - last))
+        st.warning(f"Espere {falta}s para a próxima ação (limite de cota).")
+        st.stop()
+    st.session_state["_last_call_ts"] = now
+
+# =========================== DB ==============================
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
@@ -82,7 +102,6 @@ def init_db():
         con.commit()
 
 def hash_password(p: str) -> str:
-    # DEMO: sha256 (para produção use passlib[bcrypt])
     return hashlib.sha256(p.encode("utf-8")).hexdigest()
 
 def user_exists(username: str) -> bool:
@@ -108,9 +127,44 @@ def check_credentials(username: str, password: str) -> bool:
         row = cur.fetchone()
         return bool(row and row[0] == hash_password(password))
 
-# --------------------------- UI BASE -------------------------
-init_db()
+# ====================== PDF → TEXTO helper ====================
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extrai texto de PDF usando PyPDF2; se falhar, tenta pypdf ou pdfplumber."""
+    text = ""
+    # PyPDF2
+    try:
+        import PyPDF2
+        from io import BytesIO
+        reader = PyPDF2.PdfReader(BytesIO(file_bytes))
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception:
+        pass
+    # pypdf
+    try:
+        import pypdf
+        from io import BytesIO
+        reader = pypdf.PdfReader(BytesIO(file_bytes))
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception:
+        pass
+    # pdfplumber
+    try:
+        import pdfplumber
+        from io import BytesIO
+        with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+        return text
+    except Exception:
+        pass
+    return ""
 
+# ============================ UI =============================
+init_db()
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
@@ -158,254 +212,263 @@ with tab_register:
 
 st.divider()
 
-# =============================================================
-# ÁREA LOGADA
-# =============================================================
+# ---------------------- ÁREA LOGADA -------------------------
 if st.session_state.logged_in:
     st.success(f"✅ Logado como **{st.session_state.username}**.")
 
-    # Três abas: Chat, PDF->Texto e SEO Optimizer
-    tab_chat, tab_pdf, tab_seo = st.tabs(["🤖 Chat", "📄 PDF → texto", "🪄 SEO Optimizer"])
+    tab_chat, tab_pdf, tab_seo, tab_email = st.tabs(
+        ["💬 Chat (Gemini)", "📄 PDF → Texto", "🪄 SEO Optimizer", "📧 Assistente de E-mail"]
+    )
 
-    # ----------------------- ABA 1: CHAT ----------------------
+    # -------------------------- CHAT -------------------------
     with tab_chat:
-        st.header("🤖 Chatbot (Gemini)")
-
-        # Debug de modelos (opcional)
+        st.subheader("Chat com Gemini")
         with st.expander("Modelos disponíveis (debug)"):
             st.write(AVAILABLE or "—")
             st.write("Usando:", st.session_state.get("_gemini_model_id"))
 
-        # Base de conhecimento .txt (fixo + upload)
-        contexto_fixo = ""
-        try:
-            contexto_fixo = Path("data/brand_manual.txt").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            pass
+        model_id = st.session_state["_gemini_model_id"]
+        model = genai.GenerativeModel(model_id)
 
-        uploaded_txt = st.file_uploader("Envie um .txt (opcional) para o chat usar como base", type=["txt"])
-        contexto_upload = ""
-        if uploaded_txt is not None:
-            contexto_upload = uploaded_txt.read().decode("utf-8", errors="ignore")
-            st.success(f"Arquivo carregado ({len(contexto_upload)} caracteres).")
-
-        contexto = "\n\n".join(s for s in [contexto_fixo, contexto_upload] if s)
-
-        # Cria modelo com/sem system_instruction
-        if contexto:
-            instrucoes = (
-                "Você é um assistente. Use o texto abaixo como base quando for relevante. "
-                "Se a pergunta não estiver respondida pelo material, diga que não encontrou.\n\n"
-                f"{contexto}"
-            )
-            model_chat = genai.GenerativeModel(
-                st.session_state["_gemini_model_id"],
-                system_instruction=instrucoes,
-            )
-        else:
-            model_chat = genai.GenerativeModel(st.session_state["_gemini_model_id"])
-
-        # Reiniciar chat para aplicar nova base
-        if contexto and st.button("Aplicar base e reiniciar chat"):
-            st.session_state.pop("gemini_chat", None)
-            st.rerun()
-
-        # Sessão do chat
         if "gemini_chat" not in st.session_state:
-            st.session_state["gemini_chat"] = model_chat.start_chat(history=[])
+            st.session_state["gemini_chat"] = model.start_chat(history=[])
 
-        # Histórico
         for turn in st.session_state["gemini_chat"].history:
             role = "user" if turn.role == "user" else "assistant"
             with st.chat_message(role):
                 st.markdown("".join(getattr(p, "text", "") for p in turn.parts))
 
-        # Input
         prompt = st.chat_input("Pergunte algo…")
         if prompt:
+            ensure_throttle()
             with st.chat_message("user"):
                 st.markdown(prompt)
-
             with st.chat_message("assistant"):
                 placeholder = st.empty()
                 acc = ""
                 try:
-                    for chunk in st.session_state["gemini_chat"].send_message(prompt, stream=True):
-                        acc += chunk.text or ""
-                        placeholder.markdown(acc)
-                except Exception as e:
-                    st.error(f"Erro no Gemini: {e}")
+                    stream = send_with_retry(st.session_state["gemini_chat"], prompt)
+                except gexc.ResourceExhausted:
+                    fallback_id = "gemini-1.5-flash"
+                    if st.session_state.get("_gemini_model_id") != fallback_id:
+                        st.info("Cota atingida no modelo atual. Alternando para gemini-1.5-flash…")
+                        st.session_state["_gemini_model_id"] = fallback_id
+                        model = genai.GenerativeModel(fallback_id)
+                        st.session_state["gemini_chat"] = model.start_chat(history=[])
+                        stream = send_with_retry(st.session_state["gemini_chat"], prompt, max_tries=1)
+                    else:
+                        st.error("Cota atingida. Tente novamente em alguns segundos ou habilite billing no projeto.")
+                        stream = None
+                if stream:
+                    try:
+                        for chunk in stream:
+                            acc += chunk.text or ""
+                            placeholder.markdown(acc)
+                    except Exception as e:
+                        st.error(f"Erro no Gemini: {e}")
 
-        # Ações
         c1, c2 = st.columns(2)
         if c1.button("🧹 Limpar chat"):
-            st.session_state["gemini_chat"] = model_chat.start_chat(history=[])
+            st.session_state["gemini_chat"] = genai.GenerativeModel(st.session_state["_gemini_model_id"]).start_chat(history=[])
             st.rerun()
         if c2.button("🚪 Sair"):
             st.session_state.logged_in = False
             st.session_state.username = ""
             st.info("Sessão encerrada.")
+            st.rerun()
 
-    # -------------------- ABA 2: PDF → TEXTO ------------------
+    # ---------------------- PDF → TEXTO ----------------------
     with tab_pdf:
-        st.header("📄 PDF → texto")
-        pdf = st.file_uploader("Envie um PDF", type=["pdf"])
-        if pdf is not None:
-            try:
-                reader = PdfReader(pdf)
-                textos = []
-                for i, page in enumerate(reader.pages):
-                    txt = page.extract_text() or ""
-                    textos.append(f"\n--- Página {i+1} ---\n{txt}")
-                full_text = "".join(textos).strip()
-                if not full_text:
-                    st.warning("Não foi possível extrair texto. Se o PDF for escaneado (imagem), será necessário OCR.")
-                st.text_area("Texto extraído", full_text, height=400)
-                st.download_button(
-                    "⬇️ Baixar .txt",
-                    full_text,
-                    file_name="pdf_texto.txt",
-                    mime="text/plain",
-                )
-            except Exception as e:
-                st.error(f"Erro ao ler PDF: {e}")
-        else:
-            st.info("Envie um PDF para extrair o texto.")
-
-    # --------------------- ABA 3: SEO OPTIMIZER ---------------
-    with tab_seo:
-        st.header("🪄 SEO Optimizer (Gemini)")
-        st.caption("Cole seu texto e gere uma versão otimizada para SEO: título, meta, slug, headings, corpo reescrito, keywords, FAQs e JSON-LD.")
-
-        colA, colB, colC = st.columns(3)
-        with colA:
-            idioma = st.selectbox("Idioma de saída", ["pt-BR", "en-US", "es-ES"], index=0)
-        with colB:
-            objetivo = st.selectbox("Objetivo", ["Blog post", "Landing page", "Product page", "Anúncio"], index=0)
-        with colC:
-            tom = st.selectbox("Tom", ["neutro", "confiável", "didático", "persuasivo"], index=1)
-
-        kws = st.text_input("Palavras-chave alvo (separadas por vírgula)", placeholder="ex.: login streamlit, chatbot gemini, pdf para texto")
-        tamanho = st.slider("Tamanho do texto reescrito (aprox.)", min_value=300, max_value=2000, step=100, value=800)
-        incluir_schema = st.checkbox("Sugerir JSON-LD (schema.org)", value=True)
-
-        original = st.text_area("Cole aqui seu texto original (post/artigo/copy)", height=280, placeholder="Cole seu conteúdo completo…")
-        gerar = st.button("🚀 Gerar versão otimizada")
-
-        model_seo = genai.GenerativeModel(st.session_state["_gemini_model_id"])
-
-        def make_prompt(texto: str) -> str:
-            base_jsonld = ' - "jsonLd": objeto JSON-LD schema.org (WebPage/Article), mínimo title, description, inLanguage, dateModified.' if incluir_schema else ''
-            return f"""
-Você é um especialista SEO sênior. Reescreva e estruture o conteúdo abaixo em **{idioma}**,
-otimizando para SEO sem perder a clareza e a naturalidade humana. Contexto:
-- Objetivo da página: {objetivo}
-- Tom desejado: {tom}
-- Tamanho aproximado do corpo reescrito: ~{tamanho} palavras
-- Palavras-chave alvo (quando houver): {kws or "não informado"}
-
-Entregue como **JSON** com as chaves (obrigatórias):
-- "title": título SEO (<= 60 chars, CTR-friendly)
-- "metaDescription": meta description (<= 155 chars, com benefício claro)
-- "slug": slug curto e legível (kebab-case)
-- "h1": heading principal
-- "h2": array com 3–8 subtítulos sugeridos
-- "body": corpo reescrito (markdown simples, com H2/H3 quando útil)
-- "keywords": array com 5–12 termos/variações
-- "faqs": array de objetos {{ "pergunta": "...", "resposta": "..." }}
-{base_jsonld}
-
-Regras:
-- Não invente fatos. Se faltar info, seja genérico ou omita.
-- Evite keyword stuffing. Priorize legibilidade, escaneabilidade e intenção.
-- Melhore o copy com microbenefícios e CTAs sutis, quando fizer sentido.
-- Em português do Brasil quando idioma for pt-BR.
-
-### CONTEÚDO ORIGINAL
-{texto}
-"""
-
-        if gerar:
-            if not original.strip():
-                st.warning("Cole um texto primeiro.")
+        st.subheader("Converter PDF em texto")
+        pdf_file = st.file_uploader("Envie um PDF", type=["pdf"])
+        if pdf_file is not None:
+            data = pdf_file.read()
+            with st.spinner("Extraindo texto..."):
+                txt = extract_text_from_pdf(data)
+            if txt.strip():
+                st.success(f"Texto extraído ({len(txt)} caracteres).")
+                st.text_area("Conteúdo extraído", txt, height=300)
+                st.download_button("⬇️ Baixar .txt", txt, file_name="pdf_texto.txt")
             else:
-                with st.spinner("Gerando versão otimizada…"):
-                    try:
-                        resp = model_seo.generate_content(make_prompt(original))
-                        raw = (resp.text or "").strip()
-                    except Exception as e:
-                        st.error(f"Erro ao chamar o modelo: {e}")
-                        raw = ""
+                st.error("Não foi possível extrair texto deste PDF.")
 
-                if not raw:
-                    st.stop()
+    # ---------------------- SEO Optimizer --------------------
+    with tab_seo:
+        st.subheader("Otimização de SEO (Gemini)")
 
-                # Parse do JSON
-                cleaned = raw
-                if "```" in cleaned:
-                    parts = cleaned.split("```")
-                    # tenta pegar o bloco interno
-                    cleaned = parts[1] if len(parts) >= 2 else cleaned.replace("```", "")
+        col1, col2 = st.columns(2)
+        idioma = col1.selectbox("Idioma de saída", ["pt-BR", "en-US", "es-ES"], index=0)
+        objetivo = col2.selectbox("Objetivo", ["Blog post", "Landing page", "Página de produto", "Anúncio"], index=0)
+
+        col3, col4 = st.columns(2)
+        tom = col3.selectbox("Tom do texto", ["Didático", "Neutro", "Persuasivo", "Técnico"], index=0)
+        tamanho = col4.selectbox("Tamanho desejado", ["600–900", "800–1200", "1200–1800"], index=1)
+
+        keywords = st.text_input("Palavras-chave (separe por ; )", help="Ex.: tênis Nike; Air Max; Pegasus; tamanho tênis Nike")
+        incluir_jsonld = st.checkbox("Sugerir JSON-LD (schema.org)", value=True)
+
+        texto_original = st.text_area("Cole aqui seu texto original (post/artigo/copy)", height=220)
+
+        if st.button("Gerar versão otimizada"):
+            if not texto_original.strip():
+                st.warning("Cole um texto para otimizar.")
+            else:
+                ensure_throttle()
+                prompt = f"""
+Você é um assistente de SEO. Reescreva e estruture o texto a seguir, retornando um JSON com os campos:
+title (<=60 chars), meta_description (<=155), slug (kebab-case), h1, h2 (lista),
+body_markdown (conteúdo em markdown), keywords_sugeridas (lista), faqs (lista de objetos),
+{"json_ld (string JSON-LD)" if incluir_jsonld else "sem json_ld"}.
+Idioma: {idioma}. Objetivo: {objetivo}. Tom: {tom}. Tamanho: {tamanho}.
+Palavras-chave alvo: {keywords or "(não informado)"}.
+
+TEXTO ORIGINAL:
+\"\"\"{texto_original}\"\"\""""
+
+                model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
                 try:
-                    data = json.loads(cleaned)
-                except Exception:
-                    # fallback: tenta localizar { ... }
-                    try:
-                        start = cleaned.find("{")
-                        end = cleaned.rfind("}") + 1
-                        data = json.loads(cleaned[start:end])
-                    except Exception:
-                        st.error("Não foi possível interpretar o JSON retornado. Mostrando texto bruto abaixo.")
-                        st.code(raw, language="json")
-                        data = None
+                    chat = model.start_chat(history=[])
+                    stream = send_with_retry(chat, prompt)
+                    full = ""
+                    for ch in stream:
+                        full += ch.text or ""
+                    start = full.find("{")
+                    end = full.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        full_json = full[start:end+1]
+                    else:
+                        full_json = full
+                    data = json.loads(full_json)
+                except gexc.ResourceExhausted:
+                    st.error("Cota atingida. Tente novamente após alguns segundos ou habilite billing.")
+                    data = None
+                except Exception as e:
+                    st.error(f"Falha ao interpretar a resposta do modelo: {e}")
+                    st.code(full if 'full' in locals() else "", language="json")
+                    data = None
 
                 if data:
-                    st.subheader("🎯 Resultado SEO")
-                    c1, c2 = st.columns([3, 2])
-                    with c1:
-                        st.markdown(f"**Title**: {data.get('title','')}")
-                        st.markdown(f"**Meta description**: {data.get('metaDescription','')}")
-                        st.markdown(f"**Slug**: `/{data.get('slug','')}`")
-                        st.markdown(f"**H1**: {data.get('h1','')}")
-                    with c2:
-                        st.markdown("**Keywords sugeridas:**")
-                        st.write(data.get("keywords", []))
+                    st.success("Versão otimizada gerada!")
+                    st.write("**Title**:", data.get("title", ""))
+                    st.write("**Meta description**:", data.get("meta_description", ""))
+                    st.write("**Slug**:", data.get("slug", ""))
+                    st.write("**H1**:", data.get("h1", ""))
+                    st.write("**H2 sugeridos**:", data.get("h2", []))
 
-                    st.markdown("**H2 sugeridos:**")
-                    for h in data.get("h2", []):
-                        st.markdown(f"- {h}")
+                    st.markdown("### Corpo reescrito (Markdown)")
+                    body_md = data.get("body_markdown", "")
+                    st.markdown(body_md)
 
-                    st.markdown("**Corpo reescrito (markdown):**")
-                    st.write(data.get("body", ""))
+                    st.markdown("### Keywords sugeridas")
+                    st.write(data.get("keywords_sugeridas", []))
 
+                    st.markdown("### FAQs")
                     faqs = data.get("faqs", [])
-                    if faqs:
-                        st.markdown("**FAQs sugeridas:**")
-                        for faq in faqs:
-                            st.markdown(f"- **{faq.get('pergunta','')}** — {faq.get('resposta','')}")
+                    if isinstance(faqs, list) and faqs:
+                        for f in faqs:
+                            q = f.get("pergunta") or f.get("question") or ""
+                            a = f.get("resposta") or f.get("answer") or ""
+                            st.markdown(f"**Q:** {q}\n\n**A:** {a}\n")
 
-                    if incluir_schema and data.get("jsonLd"):
-                        st.markdown("**JSON-LD (schema.org):**")
-                        st.code(json.dumps(data["jsonLd"], ensure_ascii=False, indent=2), language="json")
+                    if incluir_jsonld and "json_ld" in data:
+                        st.markdown("### JSON-LD sugerido")
+                        st.code(data["json_ld"], language="json")
 
-                    # Downloads
-                    from datetime import datetime as _dt
-                    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
-                    body_txt = data.get("body", "")
-                    json_txt = json.dumps(data, ensure_ascii=False, indent=2)
+                    st.download_button("⬇️ Baixar corpo (.md)", body_md, file_name="seo_body.md")
+                    st.download_button("⬇️ Baixar pacote (.json)", json.dumps(data, ensure_ascii=False, indent=2), file_name="seo_package.json")
 
-                    st.download_button(
-                        "⬇️ Baixar corpo reescrito (.md)",
-                        body_txt,
-                        file_name=f"seo_body_{stamp}.md",
-                        mime="text/markdown",
-                    )
-                    st.download_button(
-                        "⬇️ Baixar pacote SEO (.json)",
-                        json_txt,
-                        file_name=f"seo_package_{stamp}.json",
-                        mime="application/json",
-                    )
+    # -------------------- ASSISTENTE DE E-MAIL -------------------
+    with tab_email:
+        st.subheader("Facilitar leitura e resposta de e-mail")
+
+        colA, colB = st.columns(2)
+        tom_email = colA.selectbox("Tom da resposta", ["Formal", "Casual", "Neutro"], index=0)
+        objetivo = colB.selectbox("Objetivo", ["Responder dúvidas", "Enviar proposta", "Confirmar recebimento", "Agendar reunião"], index=0)
+
+        assunto_contexto = st.text_input("(Opcional) Assunto do e-mail ou contexto curto")
+        email_bruto = st.text_area("Cole aqui o e-mail recebido (texto)", height=250, placeholder="Cole o conteúdo do e-mail que você recebeu…")
+
+        colC, colD = st.columns(2)
+        incluir_topicos = colC.checkbox("Gerar tópicos/bullets", value=True)
+        tamanho = colD.selectbox("Comprimento da resposta", ["Curta (3–5 linhas)", "Média (1–2 parágrafos)", "Longa (detalhada)"], index=1)
+
+        if st.button("Gerar resumo e rascunho de resposta"):
+            if not email_bruto.strip():
+                st.warning("Cole o e-mail recebido para gerar o resumo/rascunho.")
+            else:
+                ensure_throttle()
+                prompt_email = f"""
+Você é um assistente que ajuda a compreender e responder e-mails de forma clara e eficiente.
+
+Entrada:
+- Tom da resposta: {tom_email}
+- Objetivo: {objetivo}
+- Assunto/contexto (se houver): {assunto_contexto or "(não informado)"}
+- Incluir tópicos/bullets: {"sim" if incluir_topicos else "não"}
+- Comprimento desejado: {tamanho}
+
+Tarefa:
+1) RESUMO do e-mail (pontos, pedidos, prazos, anexos).
+2) ASSUNTO sugerido coerente.
+3) RASCUNHO DE RESPOSTA no tom indicado, pronto para copiar/colar.
+4) 3–5 PERGUNTAS DE FOLLOW-UP.
+5) Se "{incluir_topicos}" inclua uma versão em BULLETS.
+
+E-mail recebido:
+\"\"\"{email_bruto}\"\"\" 
+
+Formato de saída em JSON:
+{{
+  "resumo": "...",
+  "assunto_sugerido": "...",
+  "resposta_sugerida": "...",
+  "bullets": ["...","..."],
+  "follow_up": ["...","..."]
+}}
+"""
+                try:
+                    model = genai.GenerativeModel(st.session_state["_gemini_model_id"])
+                    chat = model.start_chat(history=[])
+                    stream = send_with_retry(chat, prompt_email)
+                    full = ""
+                    for ch in stream:
+                        full += ch.text or ""
+                    start = full.find("{")
+                    end = full.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        payload = json.loads(full[start:end+1])
+                    else:
+                        payload = json.loads(full)
+
+                    st.success("Resumo e rascunho gerados!")
+
+                    st.markdown("### 🧩 Resumo")
+                    st.write(payload.get("resumo", ""))
+
+                    st.markdown("### 📨 Assunto sugerido")
+                    st.write(payload.get("assunto_sugerido", ""))
+
+                    st.markdown("### ✍️ Resposta sugerida")
+                    resposta_txt = payload.get("resposta_sugerida", "")
+                    st.text_area("Rascunho (edite antes de copiar)", value=resposta_txt, height=220, key="draft_email")
+
+                    if incluir_topicos:
+                        st.markdown("### • Versão em bullets")
+                        for item in payload.get("bullets", []):
+                            st.markdown(f"- {item}")
+
+                    st.markdown("### ❓ Follow-up")
+                    for q in payload.get("follow_up", []):
+                        st.markdown(f"- {q}")
+
+                    st.download_button("⬇️ Baixar rascunho (.txt)", data=resposta_txt, file_name="resposta_email.txt")
+
+                except gexc.ResourceExhausted:
+                    st.error("Cota atingida. Aguarde alguns segundos ou habilite billing no projeto.")
+                except Exception as e:
+                    st.error(f"Erro ao gerar o rascunho: {e}")
+                    if "full" in locals():
+                        st.code(full, language="json")
 
 else:
     st.info("Faça login para acessar o conteúdo.")
